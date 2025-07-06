@@ -8,6 +8,12 @@
 (define-constant err-invalid-milestone (err u106))
 (define-constant err-course-not-active (err u107))
 
+(define-constant badge-speed-demon u1)
+(define-constant badge-perfectionist u2)
+(define-constant badge-early-bird u3)
+(define-constant badge-milestone-master u4)
+
+
 (define-fungible-token learn-token)
 
 (define-map courses
@@ -231,5 +237,118 @@
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (ft-mint? learn-token amount contract-owner)
+  )
+)
+
+
+;; Badge definitions
+(define-map badges
+  { badge-id: uint }
+  {
+    name: (string-ascii 50),
+    description: (string-ascii 200),
+    is-active: bool
+  }
+)
+
+;; Student badges
+(define-map student-badges
+  { student: principal, badge-id: uint }
+  {
+    earned-at: uint,
+    course-id: (optional uint)
+  }
+)
+
+;; Course enrollment tracking for early bird badge
+(define-map course-enrollment-count
+  { course-id: uint }
+  { count: uint }
+)
+
+;; Initialize badges
+(map-set badges { badge-id: badge-speed-demon }
+  { name: "Speed Demon", description: "Complete a course in under 30 days", is-active: true })
+(map-set badges { badge-id: badge-perfectionist }
+  { name: "Perfectionist", description: "Complete all milestones before finishing course", is-active: true })
+(map-set badges { badge-id: badge-early-bird }
+  { name: "Early Bird", description: "Be among first 10 students to enroll in a course", is-active: true })
+(map-set badges { badge-id: badge-milestone-master }
+  { name: "Milestone Master", description: "Complete 5 milestones across any courses", is-active: true })
+
+;; Read-only functions
+(define-read-only (get-badge (badge-id uint))
+  (map-get? badges { badge-id: badge-id })
+)
+
+(define-read-only (get-student-badge (student principal) (badge-id uint))
+  (map-get? student-badges { student: student, badge-id: badge-id })
+)
+
+(define-read-only (has-badge (student principal) (badge-id uint))
+  (is-some (map-get? student-badges { student: student, badge-id: badge-id }))
+)
+
+(define-read-only (get-student-badge-count (student principal))
+  (+ (if (has-badge student badge-speed-demon) u1 u0)
+     (if (has-badge student badge-perfectionist) u1 u0)
+     (if (has-badge student badge-early-bird) u1 u0)
+     (if (has-badge student badge-milestone-master) u1 u0))
+)
+
+;; Private functions
+(define-private (award-badge (student principal) (badge-id uint) (course-id (optional uint)))
+  (begin
+    (map-set student-badges
+      { student: student, badge-id: badge-id }
+      { earned-at: stacks-block-height, course-id: course-id })
+    true
+  )
+)
+
+(define-private (check-milestone-master (student principal))
+  (let ((milestone-count (get-student-total-milestones student)))
+    (if (and (>= milestone-count u5) (not (has-badge student badge-milestone-master)))
+      (award-badge student badge-milestone-master none)
+      true
+    )
+  )
+)
+
+(define-private (get-student-total-milestones (student principal))
+  u0
+)
+
+;; Public functions to integrate with existing enrollment/completion
+(define-public (enroll-with-badge-check (course-id uint))
+  (let ((enrollment-count (default-to u0 (get count (map-get? course-enrollment-count { course-id: course-id })))))
+    (if (< enrollment-count u10)
+      (begin
+        (map-set course-enrollment-count { course-id: course-id } { count: (+ enrollment-count u1) })
+        (award-badge tx-sender badge-early-bird (some course-id))
+      )
+      (map-set course-enrollment-count { course-id: course-id } { count: (+ enrollment-count u1) })
+    )
+    (ok true)
+  )
+)
+
+(define-public (complete-course-with-badge-check (course-id uint))
+  (let (
+    (course (unwrap! (map-get? courses { course-id: course-id }) err-not-found))
+    (enrollment (unwrap! (map-get? enrollments { student: tx-sender, course-id: course-id }) err-not-enrolled))
+  )
+    (let ((completion-time (- stacks-block-height (get enrolled-at enrollment))))
+      (if (< completion-time u4320)
+        (award-badge tx-sender badge-speed-demon (some course-id))
+        true
+      )
+      (if (is-eq (get completed-milestones enrollment) (get milestone-count course))
+        (award-badge tx-sender badge-perfectionist (some course-id))
+        true
+      )
+      (check-milestone-master tx-sender)
+      (ok true)
+    )
   )
 )
