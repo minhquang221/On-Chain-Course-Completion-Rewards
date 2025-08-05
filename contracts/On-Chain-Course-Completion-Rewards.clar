@@ -352,3 +352,78 @@
     )
   )
 )
+
+(define-map course-reviews
+  { course-id: uint, student: principal }
+  {
+    rating: uint,
+    review-text: (string-ascii 500),
+    submitted-at: uint
+  }
+)
+
+(define-map course-rating-summary
+  { course-id: uint }
+  {
+    total-ratings: uint,
+    rating-sum: uint,
+    review-count: uint
+  }
+)
+
+(define-constant err-not-completed (err u108))
+(define-constant err-already-reviewed (err u109))
+(define-constant err-invalid-rating (err u110))
+
+(define-read-only (get-course-review (course-id uint) (student principal))
+  (map-get? course-reviews { course-id: course-id, student: student })
+)
+
+(define-read-only (get-course-rating-summary (course-id uint))
+  (map-get? course-rating-summary { course-id: course-id })
+)
+
+(define-read-only (get-course-average-rating (course-id uint))
+  (match (map-get? course-rating-summary { course-id: course-id })
+    summary (if (> (get total-ratings summary) u0)
+              (some (/ (get rating-sum summary) (get total-ratings summary)))
+              none)
+    none
+  )
+)
+
+(define-read-only (has-reviewed-course (course-id uint) (student principal))
+  (is-some (map-get? course-reviews { course-id: course-id, student: student }))
+)
+
+(define-public (submit-course-review (course-id uint) (rating uint) (review-text (string-ascii 500)))
+  (let (
+    (enrollment (unwrap! (map-get? enrollments { student: tx-sender, course-id: course-id }) err-not-enrolled))
+    (current-summary (default-to { total-ratings: u0, rating-sum: u0, review-count: u0 } 
+                     (map-get? course-rating-summary { course-id: course-id })))
+  )
+    (asserts! (get is-completed enrollment) err-not-completed)
+    (asserts! (and (>= rating u1) (<= rating u5)) err-invalid-rating)
+    (asserts! (is-none (map-get? course-reviews { course-id: course-id, student: tx-sender })) err-already-reviewed)
+    
+    (map-set course-reviews
+      { course-id: course-id, student: tx-sender }
+      {
+        rating: rating,
+        review-text: review-text,
+        submitted-at: stacks-block-height
+      }
+    )
+    
+    (map-set course-rating-summary
+      { course-id: course-id }
+      {
+        total-ratings: (+ (get total-ratings current-summary) u1),
+        rating-sum: (+ (get rating-sum current-summary) rating),
+        review-count: (+ (get review-count current-summary) u1)
+      }
+    )
+    
+    (ok true)
+  )
+)
