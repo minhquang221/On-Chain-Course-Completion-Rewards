@@ -13,6 +13,11 @@
 (define-constant badge-early-bird u3)
 (define-constant badge-milestone-master u4)
 
+(define-data-var next-certificate-id uint u1)
+
+(define-constant err-cert-not-found (err u111))
+(define-constant err-cert-already-exists (err u112))
+
 
 (define-fungible-token learn-token)
 
@@ -426,4 +431,71 @@
     
     (ok true)
   )
+)
+
+(define-non-fungible-token course-certificate uint)
+
+(define-map certificates
+  { certificate-id: uint }
+  {
+    student: principal,
+    course-id: uint,
+    course-title: (string-ascii 100),
+    issued-at: uint,
+    completion-time-days: uint,
+    final-grade: uint
+  }
+)
+
+
+(define-read-only (get-certificate (certificate-id uint))
+  (map-get? certificates { certificate-id: certificate-id })
+)
+
+(define-read-only (get-student-certificate-count (student principal))
+  (let ((count u0))
+    (+ (if (is-eq (nft-get-owner? course-certificate u1) (some student)) u1 u0)
+       (if (is-eq (nft-get-owner? course-certificate u2) (some student)) u1 u0)
+       (if (is-eq (nft-get-owner? course-certificate u3) (some student)) u1 u0))
+  )
+)
+
+(define-read-only (certificate-exists (certificate-id uint))
+  (is-some (nft-get-owner? course-certificate certificate-id))
+)
+
+(define-public (mint-course-certificate (course-id uint))
+  (let (
+    (course (unwrap! (map-get? courses { course-id: course-id }) err-not-found))
+    (enrollment (unwrap! (map-get? enrollments { student: tx-sender, course-id: course-id }) err-not-enrolled))
+    (certificate-id (var-get next-certificate-id))
+    (completion-days (/ (- stacks-block-height (get enrolled-at enrollment)) u144))
+    (grade (if (<= (+ u70 (* (get completed-milestones enrollment) u5)) u100)
+               (+ u70 (* (get completed-milestones enrollment) u5))
+               u100))
+  )
+    (asserts! (get is-completed enrollment) err-not-completed)
+    (asserts! (is-none (nft-get-owner? course-certificate certificate-id)) err-cert-already-exists)
+    
+    (try! (nft-mint? course-certificate certificate-id tx-sender))
+    
+    (map-set certificates
+      { certificate-id: certificate-id }
+      {
+        student: tx-sender,
+        course-id: course-id,
+        course-title: (get title course),
+        issued-at: stacks-block-height,
+        completion-time-days: completion-days,
+        final-grade: grade
+      }
+    )
+    
+    (var-set next-certificate-id (+ certificate-id u1))
+    (ok certificate-id)
+  )
+)
+
+(define-public (transfer-certificate (certificate-id uint) (recipient principal))
+  (nft-transfer? course-certificate certificate-id tx-sender recipient)
 )
