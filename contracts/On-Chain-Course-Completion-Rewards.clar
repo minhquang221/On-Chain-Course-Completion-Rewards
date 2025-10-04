@@ -13,6 +13,19 @@
 (define-constant badge-early-bird u3)
 (define-constant badge-milestone-master u4)
 
+(define-constant streak-tier-bronze u3)
+(define-constant streak-tier-silver u7)
+(define-constant streak-tier-gold u14)
+(define-constant streak-tier-platinum u30)
+
+(define-constant streak-multiplier-bronze u2)
+(define-constant streak-multiplier-silver u3)
+(define-constant streak-multiplier-gold u5)
+(define-constant streak-multiplier-platinum u10)
+
+(define-constant blocks-per-day u144)
+(define-constant max-streak-gap u288)
+
 (define-data-var next-certificate-id uint u1)
 
 (define-constant err-cert-not-found (err u111))
@@ -498,4 +511,85 @@
 
 (define-public (transfer-certificate (certificate-id uint) (recipient principal))
   (nft-transfer? course-certificate certificate-id tx-sender recipient)
+)
+
+
+(define-map student-streaks
+  { student: principal }
+  {
+    current-streak: uint,
+    longest-streak: uint,
+    last-activity-block: uint,
+    total-streak-rewards: uint
+  }
+)
+
+(define-map streak-leaderboard
+  { rank: uint }
+  {
+    student: principal,
+    streak-length: uint
+  }
+)
+
+(define-read-only (get-student-streak (student principal))
+  (default-to 
+    { current-streak: u0, longest-streak: u0, last-activity-block: u0, total-streak-rewards: u0 }
+    (map-get? student-streaks { student: student }))
+)
+
+(define-read-only (get-streak-bonus-multiplier (streak-days uint))
+  (if (>= streak-days streak-tier-platinum) streak-multiplier-platinum
+    (if (>= streak-days streak-tier-gold) streak-multiplier-gold
+      (if (>= streak-days streak-tier-silver) streak-multiplier-silver
+        (if (>= streak-days streak-tier-bronze) streak-multiplier-bronze u1))))
+)
+
+(define-read-only (calculate-streak-bonus (base-reward uint) (streak-days uint))
+  (let ((multiplier (get-streak-bonus-multiplier streak-days)))
+    (if (> multiplier u1)
+      (/ (* base-reward (- multiplier u1)) u10)
+      u0))
+)
+
+(define-private (update-student-streak (student principal))
+  (let (
+    (streak-data (get-student-streak student))
+    (last-block (get last-activity-block streak-data))
+    (block-diff (- stacks-block-height last-block))
+  )
+    (if (and (> last-block u0) (<= block-diff max-streak-gap))
+      (map-set student-streaks { student: student }
+        (merge streak-data {
+          current-streak: (+ (get current-streak streak-data) u1),
+          longest-streak: (if (> (+ (get current-streak streak-data) u1) (get longest-streak streak-data))
+                            (+ (get current-streak streak-data) u1)
+                            (get longest-streak streak-data)),
+          last-activity-block: stacks-block-height
+        }))
+      (map-set student-streaks { student: student }
+        { current-streak: u1, 
+          longest-streak: (get longest-streak streak-data), 
+          last-activity-block: stacks-block-height,
+          total-streak-rewards: (get total-streak-rewards streak-data) }))
+    (get current-streak (get-student-streak student))
+  )
+)
+
+(define-public (complete-milestone-with-streak (course-id uint) (milestone-id uint))
+  (let (
+    (milestone (unwrap! (get-milestone course-id milestone-id) err-invalid-milestone))
+    (base-reward (get reward-amount milestone))
+    (new-streak (update-student-streak tx-sender))
+    (bonus-reward (calculate-streak-bonus base-reward new-streak))
+  )
+    (if (> bonus-reward u0)
+      (begin
+        (try! (ft-mint? learn-token bonus-reward tx-sender))
+        (let ((streak-data (get-student-streak tx-sender)))
+          (map-set student-streaks { student: tx-sender }
+            (merge streak-data { total-streak-rewards: (+ (get total-streak-rewards streak-data) bonus-reward) })))
+        (ok { streak: new-streak, bonus: bonus-reward }))
+      (ok { streak: new-streak, bonus: u0 }))
+  )
 )
