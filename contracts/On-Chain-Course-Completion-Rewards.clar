@@ -26,6 +26,10 @@
 (define-constant blocks-per-day u144)
 (define-constant max-streak-gap u288)
 
+(define-constant err-self-referral (err u113))
+(define-constant err-referrer-not-found (err u114))
+(define-constant referral-bonus-percentage u10)
+
 (define-data-var next-certificate-id uint u1)
 
 (define-constant err-cert-not-found (err u111))
@@ -591,5 +595,89 @@
             (merge streak-data { total-streak-rewards: (+ (get total-streak-rewards streak-data) bonus-reward) })))
         (ok { streak: new-streak, bonus: bonus-reward }))
       (ok { streak: new-streak, bonus: u0 }))
+  )
+)
+
+(define-map student-referrals
+  { student: principal }
+  {
+    referrer: (optional principal),
+    total-referrals: uint,
+    total-referral-rewards: uint,
+    referral-milestone-count: uint
+  }
+)
+
+(define-map referral-leaderboard
+  { rank: uint }
+  {
+    student: principal,
+    referral-count: uint
+  }
+)
+
+(define-read-only (get-student-referral-data (student principal))
+  (default-to 
+    { referrer: none, total-referrals: u0, total-referral-rewards: u0, referral-milestone-count: u0 }
+    (map-get? student-referrals { student: student }))
+)
+
+(define-read-only (get-referral-bonus (base-reward uint))
+  (/ (* base-reward referral-bonus-percentage) u100)
+)
+
+(define-read-only (has-referrer (student principal))
+  (is-some (get referrer (get-student-referral-data student)))
+)
+
+(define-public (enroll-with-referral (course-id uint) (referrer principal))
+  (let (
+    (course (unwrap! (map-get? courses { course-id: course-id }) err-not-found))
+    (referrer-data (get-student-referral-data referrer))
+  )
+    (asserts! (not (is-eq tx-sender referrer)) err-self-referral)
+    (asserts! (get is-active course) err-course-not-active)
+    (asserts! (is-none (map-get? enrollments { student: tx-sender, course-id: course-id })) err-already-exists)
+    (asserts! (is-student-enrolled referrer course-id) err-referrer-not-found)
+    
+    (map-set enrollments
+      { student: tx-sender, course-id: course-id }
+      { enrolled-at: stacks-block-height, completed-milestones: u0, is-completed: false, completion-date: none }
+    )
+    
+    (map-set student-referrals { student: tx-sender }
+      { referrer: (some referrer), total-referrals: u0, total-referral-rewards: u0, referral-milestone-count: u0 }
+    )
+    
+    (map-set student-referrals { student: referrer }
+      (merge referrer-data { total-referrals: (+ (get total-referrals referrer-data) u1) })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (complete-milestone-with-referral (course-id uint) (milestone-id uint))
+  (let (
+    (milestone (unwrap! (get-milestone course-id milestone-id) err-invalid-milestone))
+    (student-data (get-student-referral-data tx-sender))
+    (base-reward (get reward-amount milestone))
+    (bonus-reward (get-referral-bonus base-reward))
+  )
+    (match (get referrer student-data)
+      referrer-principal (begin
+        (try! (ft-mint? learn-token bonus-reward referrer-principal))
+        (try! (ft-mint? learn-token bonus-reward tx-sender))
+        (let ((referrer-data (get-student-referral-data referrer-principal)))
+          (map-set student-referrals { student: referrer-principal }
+            (merge referrer-data { 
+              total-referral-rewards: (+ (get total-referral-rewards referrer-data) bonus-reward),
+              referral-milestone-count: (+ (get referral-milestone-count referrer-data) u1)
+            }))
+        )
+        (map-set student-referrals { student: tx-sender }
+          (merge student-data { total-referral-rewards: (+ (get total-referral-rewards student-data) bonus-reward) }))
+        (ok { referral-bonus: bonus-reward, referrer: (some referrer-principal) }))
+      (ok { referral-bonus: u0, referrer: none }))
   )
 )
